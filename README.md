@@ -54,6 +54,10 @@ uv run python -m src.train --real --epochs 5 --patient-split
 # real patient-split with the full research recipe:
 uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros --wcmix
 
+# measured on real MIT-BIH DS1->DS2 (100,633 beats, focal + ros + wcmix + GAN F):
+# macro 0.514 -> 0.686 (N 0.77, S 0.81, V 0.94, F 0.23) at 17,529 params.
+# Best macro to date; S record (0.81); F still below the no-synth best (0.39).
+
 # maintained checks (no extra framework):
 uv run python -m tests.test_upgrades
 ```
