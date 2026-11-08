@@ -1,0 +1,8 @@
+# Fast synthetic smoke of config plumbing (not a result).
+loss = "focal"
+minibatch = true
+sched = "plateau"
+swa = true
+val = true
+epochs = 1
+seed = 0

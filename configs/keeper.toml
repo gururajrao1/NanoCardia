@@ -1,0 +1,8 @@
+# Original keeper recipe (test-peeking selection; kept for comparison only).
+real = true
+patient_split = true
+loss = "focal"
+ros = true
+wcmix = true
+epochs = 10
+seed = 0

@@ -1,0 +1,13 @@
+# Stabilized keeper recipe: val-selected, minority batches, plateau, SWA.
+# The number this produces is the one we believe (mean±std over seeds).
+real = true
+patient_split = true
+loss = "focal"
+ros = true
+wcmix = true
+minibatch = true
+sched = "plateau"
+swa = true
+val = true
+epochs = 10
+seed = 0

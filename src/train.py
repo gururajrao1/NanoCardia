@@ -13,6 +13,9 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    # determinism lockdown: same seed + same code + same data => same numbers.
+    # warn_only: keep running if an op lacks a deterministic kernel.
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def save_ckpt(path, state, meta):
@@ -383,6 +386,25 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
     }
 
 
+def apply_config(ap):
+    """Two-stage --config: TOML values become parser defaults (CLI wins)."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--config', default=None,
+                     help='TOML file with argument values (CLI overrides file)')
+    known, _ = pre.parse_known_args()
+    if known.config is None:
+        return None
+    import tomllib
+    with open(known.config, 'rb') as f:
+        cfg = tomllib.load(f)
+    valid = {a.dest for a in ap._actions}
+    bad = sorted(set(cfg) - valid)
+    if bad:
+        raise SystemExit(f"unknown config keys in {known.config}: {bad}")
+    ap.set_defaults(**cfg)
+    return known.config
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--synthetic', action='store_true')
@@ -427,8 +449,20 @@ def main():
                     help='hold out every 7th train record for checkpoint selection')
     ap.add_argument('--no-rr', action='store_true',
                     help='RR ablation: drop the RR-interval branch entirely')
+    ap.add_argument('--config', default=None,
+                    help='TOML file with argument values (CLI overrides file)')
+    cfg = apply_config(ap)
     a = ap.parse_args()
     set_seed(a.seed)
+    resolved = {k: v for k, v in sorted(vars(a).items())}
+    print(f"config {cfg or 'cli-only'}: " +
+          ' '.join(f"{k}={v}" for k, v in resolved.items()
+                   if v not in (False, None, 0, 0.0, '')) or '(defaults)',
+          flush=True)
+    if a.save is not None:
+        import json
+        with open(a.save + '.config.json', 'w') as f:
+            json.dump(resolved, f, indent=1, default=str)
     mode = 'real' if a.real else 'synthetic'
     (Xtr, ytr, rrtr, ptr), (Xte, yte, rrte, pte) = get_data(mode, a.patient_split)
     if a.seq:

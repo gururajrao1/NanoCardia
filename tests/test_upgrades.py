@@ -200,6 +200,53 @@ def test_checkpoint_roundtrip_and_ensemble():
     assert (0.1 * z1 + 0.9 * z2).argmax(1).item() == 3
 
 
+def test_same_seed_same_result():
+    # determinism lockdown: identical seed => identical numbers
+    from src.data import synthetic_beats
+    from src.train import run_once, set_seed
+    X, y, p, rr = synthetic_beats(n=1200, seed=1)
+    kw = dict(Xte=X[960:], yte=y[960:], use_weights=True, epochs=1,
+              rrtr=rr[:960], rrte=rr[960:], loss='focal')
+    set_seed(0)
+    r1 = run_once(X[:960], y[:960], **kw)
+    set_seed(0)
+    r2 = run_once(X[:960], y[:960], **kw)
+    assert r1['macro_recall'] == r2['macro_recall']
+    assert r1['per_class'] == r2['per_class']
+
+
+def test_config_file_overrides_and_rejects():
+    import tempfile, os
+    from src.train import apply_config
+    import argparse
+    d = tempfile.mkdtemp()
+    good = os.path.join(d, 'good.toml')
+    with open(good, 'w') as f:
+        f.write('epochs = 7\nswa = true\n')
+    import sys
+    old = sys.argv
+    try:
+        sys.argv = ['prog', '--config', good]
+        ap = argparse.ArgumentParser()
+        ap.add_argument('--config', default=None)
+        ap.add_argument('--epochs', type=int, default=10)
+        ap.add_argument('--swa', action='store_true')
+        apply_config(ap)
+        a = ap.parse_args()
+        assert a.epochs == 7 and a.swa is True
+        bad = os.path.join(d, 'bad.toml')
+        with open(bad, 'w') as f:
+            f.write('nope = 1\n')
+        sys.argv = ['prog', '--config', bad]
+        try:
+            apply_config(ap)
+            raise AssertionError('unknown key accepted')
+        except SystemExit:
+            pass
+    finally:
+        sys.argv = old
+
+
 def test_ode_blend_shapes_and_filter():
     from src.ode_synth import synthesize_f, plausible, znorm
     rng = np.random.default_rng(8)
@@ -279,4 +326,6 @@ if __name__ == '__main__':
     test_minority_batches_and_holdout()
     test_ode_blend_shapes_and_filter()
     test_make_windows_no_rr()
+    test_same_seed_same_result()
+    test_config_file_overrides_and_rejects()
     print('all upgrade checks passed')

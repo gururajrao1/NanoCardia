@@ -1,0 +1,13 @@
+# Adversarial sequence model with val selection.
+real = true
+patient_split = true
+seq = true
+loss = "focal"
+ros = true
+adv = true
+minibatch = true
+sched = "plateau"
+swa = true
+val = true
+epochs = 10
+seed = 0
