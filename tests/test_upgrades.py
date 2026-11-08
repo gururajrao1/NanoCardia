@@ -200,6 +200,40 @@ def test_checkpoint_roundtrip_and_ensemble():
     assert (0.1 * z1 + 0.9 * z2).argmax(1).item() == 3
 
 
+def test_selfonn_forward_grad_and_budget():
+    from src.model import SelfONN1d, EfficientECG, count_params
+    m = SelfONN1d(1, 16, 7, Q=3, stride=2, padding=3).train()
+    x = torch.randn(4, 1, 188, requires_grad=False)
+    y = m(x)
+    assert y.shape == (4, 16, 94)
+    y.sum().backward()  # all Q branches get gradients
+    assert all(c.weight.grad is not None and torch.isfinite(c.weight.grad).all()
+               for c in m.convs)
+    q1 = SelfONN1d(1, 16, 7, Q=1, stride=2, padding=3)
+    assert count_params(m) > count_params(q1)  # higher Q costs params
+    e0 = EfficientECG().eval()
+    e1 = EfficientECG(use_selfonn=True).eval()
+    assert e1(x).shape == (4, 4)
+    assert count_params(e1) < 25000
+    assert count_params(e1) - count_params(e0) < 2000  # stem-only swap
+    assert count_params(EfficientECG(use_rr=False, use_selfonn=True)) < \
+        count_params(e1)
+
+
+def test_rr_per_patient_normalized():
+    from src.data import synthetic_beats, col_znorm
+    a = np.array([[0.5, 0.8], [0.7, 1.0], [0.9, 1.2]], dtype=np.float32)
+    z = col_znorm(a)
+    assert np.allclose(z.mean(0), 0, atol=1e-6)
+    assert np.allclose(z.std(0), 1, atol=1e-6)
+    _, _, p, rr = synthetic_beats(n=1200, seed=0)
+    for pat in np.unique(p):
+        blk = rr[p == pat]
+        if len(blk) > 1:
+            assert np.allclose(blk.mean(0), 0, atol=1e-5)
+            assert np.allclose(blk.std(0), 1, atol=1e-5)
+
+
 def test_same_seed_same_result():
     # determinism lockdown: identical seed => identical numbers
     from src.data import synthetic_beats
@@ -328,4 +362,6 @@ if __name__ == '__main__':
     test_make_windows_no_rr()
     test_same_seed_same_result()
     test_config_file_overrides_and_rejects()
+    test_selfonn_forward_grad_and_budget()
+    test_rr_per_patient_normalized()
     print('all upgrade checks passed')

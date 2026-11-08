@@ -17,6 +17,31 @@ class DSBlock(nn.Module):
         return (x + y) / 1.414 if self.res and x.shape == y.shape else y
 
 
+class SelfONN1d(nn.Module):
+    """Q-order generative neuron (Kiranyaz Self-ONN): y = b + sum_q conv_q(x^q).
+
+    Each neuron learns its own nonlinear operator as a Q-term expansion
+    instead of a fixed linear convolution + shared activation. Q=3 keeps
+    the stem compact (~1k extra params).
+    """
+    def __init__(self, in_ch, out_ch, k, Q=3, stride=1, padding=0):
+        super().__init__()
+        self.Q = Q
+        self.convs = nn.ModuleList(
+            [nn.Conv1d(in_ch, out_ch, k, stride, padding, bias=False)
+             for _ in range(Q)])
+        self.bias = nn.Parameter(torch.zeros(out_ch))
+
+    def forward(self, x):
+        out = self.bias.view(1, -1, 1)
+        p = x
+        for q, c in enumerate(self.convs, 1):
+            if q > 1:
+                p = p * x
+            out = out + c(p)
+        return out
+
+
 class ECA1d(nn.Module):
     """Efficient channel attention: 1D conv on channel-pooled descriptor.
 
@@ -42,14 +67,18 @@ class MSStem(nn.Module):
     KAN-Former ablation: removing the multi-scale block cost 12.9% accuracy.
     Two short kernels cover narrow (N/S) and wide (V/F) QRS in one pass.
     """
-    def __init__(self, w=32):
+    def __init__(self, w=32, use_selfonn=False, Q=3):
         super().__init__()
         w1, w2 = w // 2, w - w // 2
+        c7 = (lambda: SelfONN1d(1, w1, 7, Q=Q, stride=2, padding=3)) if use_selfonn else \
+             (lambda: nn.Conv1d(1, w1, 7, stride=2, padding=3, bias=False))
+        c15 = (lambda: SelfONN1d(1, w2, 15, Q=Q, stride=2, padding=7)) if use_selfonn else \
+              (lambda: nn.Conv1d(1, w2, 15, stride=2, padding=7, bias=False))
         self.b7 = nn.Sequential(
-            nn.Conv1d(1, w1, 7, stride=2, padding=3, bias=False),
+            c7(),
             nn.BatchNorm1d(w1), nn.ReLU(inplace=True))
         self.b15 = nn.Sequential(
-            nn.Conv1d(1, w2, 15, stride=2, padding=7, bias=False),
+            c15(),
             nn.BatchNorm1d(w2), nn.ReLU(inplace=True))
 
     def forward(self, x):
@@ -58,9 +87,10 @@ class MSStem(nn.Module):
 
 class EfficientECG(nn.Module):
     """~18k params: multi-scale stem + 3 DS blocks + ECA + QRS branch + RR + 1 FC."""
-    def __init__(self, n_classes=4, w=32, use_eca=True, use_rr=True, use_qrs=True):
+    def __init__(self, n_classes=4, w=32, use_eca=True, use_rr=True, use_qrs=True,
+                 use_selfonn=False):
         super().__init__()
-        self.stem = MSStem(w)
+        self.stem = MSStem(w, use_selfonn=use_selfonn)
         self.b1 = DSBlock(w, w * 2)       # 94 -> 47
         self.b2 = DSBlock(w * 2, w * 2, s=1)  # residual block
         self.b3 = DSBlock(w * 2, w * 4)   # 47 -> 24

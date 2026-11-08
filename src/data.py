@@ -21,6 +21,18 @@ def z_norm(x):
     return ((x - m) / s).astype(np.float32)
 
 
+def col_znorm(a):
+    """Per-group z-norm of RR columns (records/patients): zero mean/unit var.
+
+    Patient-normalized timing removes inter-patient baseline-rate differences
+    while preserving within-record prematurity structure (the S signal).
+    No label use, no cross-record leak: each group normalized from itself.
+    """
+    a = np.asarray(a, dtype=np.float32)
+    return ((a - a.mean(0, keepdims=True)) /
+            (a.std(0, keepdims=True) + 1e-8)).astype(np.float32)
+
+
 def extract_beats_wfdb(record_ids=None, win=188):
     """Download+cut MIT-BIH beats.
 
@@ -61,6 +73,7 @@ def extract_beats_wfdb(record_ids=None, win=188):
         syms = list(ann.symbol)
         diffs = np.diff(samp) / fs
         med = float(np.median(diffs)) if len(diffs) else 0.8
+        rs_rec = []
         for j in range(len(samp)):
             sym = syms[j]
             if sym not in AAMI_MAP:
@@ -77,7 +90,10 @@ def extract_beats_wfdb(record_ids=None, win=188):
             Xs.append(z_norm(beat))
             ys.append(AAMI_MAP[sym])
             ps.append(int(rid))
-            rs.append((pre, post, local, pre / local))
+            rs_rec.append((pre, post, local, pre / local))
+        if rs_rec:
+            # per-record timing norm: same record => same patient, no leakage
+            rs.extend(col_znorm(np.array(rs_rec, dtype=np.float32)).tolist())
     X = np.stack(Xs).astype(np.float32) if Xs else np.zeros((0, win), np.float32)
     rr = np.array(rs, dtype=np.float32) if rs else np.zeros((0, 4), np.float32)
     return X, np.array(ys, dtype=np.int64), np.array(ps, dtype=np.int64), rr
@@ -346,5 +362,9 @@ def synthetic_beats(n=12000, ratios=(0.90, 0.03, 0.06, 0.01), seed=0, patients=3
     y = np.array(ys, dtype=np.int64)
     p = np.array(ps, dtype=np.int64)
     rr = np.array(rs, dtype=np.float32)
+    for pat in np.unique(p):  # per-patient timing norm, mirrors real path
+        m = p == pat
+        if m.sum() > 1:
+            rr[m] = col_znorm(rr[m])
     idx = rng.permutation(len(X))
     return X[idx], y[idx], p[idx], rr[idx]
