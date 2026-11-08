@@ -60,8 +60,15 @@ uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros
 
 # sequence models (real DS1->DS2, 9-beat windows, focal + window-ros):
 # SeqECG: macro 0.596 (F 0.37); +curriculum 0.3: 0.529 (negative, weighting hurt);
-# +adversarial record head: 0.680 (F 0.88 new record, S 0.18 collapses).
-# SeqECG alone does not beat the single-beat recipe; ensemble is the next test.
+# +adversarial record head: 0.680 (F 0.88 new record, S 0.18 collapses) but
+# 0.543 on retrain (identical flags+seed) -- run-to-run nondeterminism confirmed.
+# SeqECG alone does not beat the single-beat recipe; ensemble of weak members: 0.51.
+
+# seed-shock verdict: keeper 0.686 never reproduced (0.535, 0.543, 0.535).
+# Stabilized recipe (val + minibatch + plateau + SWA), 3 seeds, same data/flags:
+# 0.496 / 0.496 / 0.510 -> mean 0.501 +- 0.008, F 0.00 every time.
+# Tight variance, collapsed level. No-RR ablation: 0.485. ODE-gated F: 0.513
+# (F 0.13 -- only nonzero F in the grid). RR worth ~+0.015; ODE beats GAN (0.00).
 
 # CNN + SeqECG ensemble (train each with --save/--seed, then combine logits):
 uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros --wcmix --ganf gan_f_beats.npz --save cnn.pt --seed 0
