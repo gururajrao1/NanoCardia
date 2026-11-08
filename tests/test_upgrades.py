@@ -200,6 +200,33 @@ def test_checkpoint_roundtrip_and_ensemble():
     assert (0.1 * z1 + 0.9 * z2).argmax(1).item() == 3
 
 
+def test_ode_blend_shapes_and_filter():
+    from src.ode_synth import synthesize_f, plausible, znorm
+    rng = np.random.default_rng(8)
+    t = np.linspace(0, 1, 188)
+    Xn = np.stack([znorm(np.exp(-((t - 0.5) ** 2) / 0.0008) +
+                         rng.normal(0, 0.05, 188)) for _ in range(60)])
+    Xv = np.stack([znorm(1.4 * np.exp(-((t - 0.52) ** 2) / 0.008) +
+                         rng.normal(0, 0.05, 188)) for _ in range(30)])
+    rr = rng.uniform(0.3, 1.2, size=(10, 4)).astype(np.float32)
+    Xs, rs = synthesize_f(Xn, Xv, rr, 20, seed=0)
+    assert Xs.shape == (20, 188) and rs.shape == (20, 4)
+    assert np.isfinite(Xs).all()
+    # pure noise fails the gate; a real blend passes
+    assert not plausible(rng.normal(size=188).astype(np.float32),
+                         Xn[0], Xv[0])
+    assert plausible(Xs[0], np.median(Xn, axis=0), np.median(Xv, axis=0))
+
+
+def test_make_windows_no_rr():
+    rng = np.random.default_rng(9)
+    X = rng.normal(size=(24, 188)).astype(np.float32)
+    y = np.arange(24) % 4
+    p = np.array([101] * 12 + [106] * 12)
+    Xw, yw, Rw, pw = make_windows(X, y, p, None, radius=2)
+    assert Xw.shape[1] == 5 and Rw is None and len(yw) == 16
+
+
 def test_minority_batches_and_holdout():
     from src.data import minority_batch_order, record_holdout
     y = np.array([0] * 100 + [1] * 6 + [2] * 20 + [3] * 4)
@@ -250,4 +277,6 @@ if __name__ == '__main__':
     test_seqecg_forward_and_adv()
     test_checkpoint_roundtrip_and_ensemble()
     test_minority_batches_and_holdout()
+    test_ode_blend_shapes_and_filter()
+    test_make_windows_no_rr()
     print('all upgrade checks passed')

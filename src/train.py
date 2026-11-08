@@ -96,7 +96,8 @@ class FocalLoss(nn.Module):
 def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
              lr=3e-3, bs=256, aug=True, loss='ce', smote=False, fmix=False,
              fmix_ratio=1.0, ros=False, wcmix=False, ganf=None, save=None,
-             minibatch=False, sched='cosine', swa=False, val=False, ptr=None):
+             minibatch=False, sched='cosine', swa=False, val=False, ptr=None,
+             use_rr=True):
     from src.data import minority_batch_order, record_holdout
     from torch.utils.data import Subset
     sel_name, sel_y, Xv, yv, Rvv = 'test', None, None, None, None
@@ -167,7 +168,7 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
         Rsv = torch.from_numpy(Rvv) if Rvv is not None else None
         sl = DataLoader(TensorDataset(Xsv, Rsv, ysv) if Rsv is not None else
                         TensorDataset(Xsv, ysv), batch_size=1024)
-    model = EfficientECG()
+    model = EfficientECG(use_rr=use_rr)
     w = None
     if use_weights:
         cnt = np.bincount(ytr, minlength=4).astype(float)
@@ -243,7 +244,8 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
 def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
               lr=3e-3, bs=128, loss='ce', ros_w=False, curriculum=0.0,
               adv=False, adv_lamb=0.1, radius=4, save=None,
-              minibatch=False, sched='cosine', swa=False, val=False):
+              minibatch=False, sched='cosine', swa=False, val=False,
+              use_rr=True):
     """Windowed rhythm-context training (train windows only, test untouched).
 
     Curriculum: first `curriculum` fraction of epochs sees minority-center
@@ -264,6 +266,12 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
               flush=True)
     if ros_w:
         Xwtr, ywtr, Rwtr, pwtr = repeat_minority_windows(Xwtr, ywtr, Rwtr, pwtr)
+    if Rwtr is None:  # --no-rr: shape-compatible zeros; trunk ignores them
+        Rwtr = np.zeros((len(ywtr), Xwtr.shape[1], 4), np.float32)
+    if Rwte is None:
+        Rwte = np.zeros((len(ywte), Xwte.shape[1], 4), np.float32)
+    if val and Rwv is None:
+        Rwv = np.zeros((len(ywv), Xwtr.shape[1], 4), np.float32)
     recs = np.unique(pwtr)
     pmap = {r: i for i, r in enumerate(recs)}
     zt = torch.from_numpy(Xwtr)
@@ -291,7 +299,9 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
                                            torch.from_numpy(ywtr[min_mask]),
                                            pt[min_mask]),
                             batch_size=bs, shuffle=True) if min_mask.any() else tl_full
-    model = SeqECG(use_adv=adv, n_patients=len(recs))
+    feat_dim = 160 if use_rr else 144
+    model = SeqECG(EfficientECG(use_rr=use_rr), use_adv=adv,
+                   n_patients=len(recs), feat_dim=feat_dim)
     def make_crit(ys):
         w = None
         if use_weights:
@@ -415,6 +425,8 @@ def main():
                     help='average last-5-epoch weights for final eval')
     ap.add_argument('--val', action='store_true',
                     help='hold out every 7th train record for checkpoint selection')
+    ap.add_argument('--no-rr', action='store_true',
+                    help='RR ablation: drop the RR-interval branch entirely')
     a = ap.parse_args()
     set_seed(a.seed)
     mode = 'real' if a.real else 'synthetic'
@@ -423,6 +435,9 @@ def main():
         if any([a.smote, a.fmix, a.wcmix, a.ganf]):
             print("note: beat-level synth flags ignored in --seq mode "
                   "(windows stay fully real)", flush=True)
+        if a.no_rr:
+            rrtr = rrte = None
+            print("ablation: RR branch off (morphology + QRS only)", flush=True)
         Xwtr, ywtr, Rwtr, pwtr = make_windows(Xtr, ytr, ptr, rrtr, radius=a.radius)
         Xwte, ywte, Rwte, _pwte = make_windows(Xte, yte, pte, rrte, radius=a.radius)
         print(f"windows train {len(ywtr)} test {len(ywte)} "
@@ -431,13 +446,15 @@ def main():
         print("== no-weights ==", flush=True)
         base = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                        use_weights=False, epochs=a.epochs,
-                       minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val)
+                       minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val,
+                       use_rr=not a.no_rr)
         print(f"== weighted ({a.loss}) ==", flush=True)
         wt = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                      use_weights=not a.no_class_weights, epochs=a.epochs,
                      loss=a.loss, ros_w=a.ros, curriculum=a.curriculum,
                      adv=a.adv, adv_lamb=a.adv_lamb, save=a.save,
-                     minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val)
+                     minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val,
+                     use_rr=not a.no_rr)
         for tag, r in [('no-weights', base), ('weighted', wt)]:
             pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
             print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "
@@ -454,15 +471,18 @@ def main():
           f"train_dist {np.bincount(ytr, minlength=4).tolist()} "
           f"test_dist {np.bincount(yte, minlength=4).tolist()}")
     print("== no-weights ==", flush=True)
+    if a.no_rr:
+        rrtr = rrte = None
+        print("ablation: RR branch off (morphology + QRS only)", flush=True)
     base = run_once(Xtr, ytr, Xte, yte, use_weights=False, epochs=a.epochs,
                     rrtr=rrtr, rrte=rrte, minibatch=a.minibatch, sched=a.sched,
-                    swa=a.swa, val=a.val, ptr=ptr)
+                    swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr)
     print(f"== weighted ({a.loss}) ==", flush=True)
     wt = run_once(Xtr, ytr, Xte, yte, use_weights=not a.no_class_weights, epochs=a.epochs,
                   rrtr=rrtr, rrte=rrte, loss=a.loss, smote=a.smote,
                   fmix=a.fmix, fmix_ratio=a.fmix_ratio, ros=a.ros, wcmix=a.wcmix,
                   ganf=a.ganf, save=a.save, minibatch=a.minibatch, sched=a.sched,
-                  swa=a.swa, val=a.val, ptr=ptr)
+                  swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr)
     for tag, r in [('no-weights', base), ('weighted', wt)]:
         pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
         print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "

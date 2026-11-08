@@ -119,10 +119,10 @@ class SeqECG(nn.Module):
     usually obvious in rhythm context). Windows never cross patients.
     """
     def __init__(self, trunk=None, n_classes=4, hidden=16,
-                 use_adv=False, n_patients=0):
+                 use_adv=False, n_patients=0, feat_dim=160):
         super().__init__()
         self.trunk = trunk or EfficientECG()
-        self.lstm = nn.LSTM(160, hidden, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(feat_dim, hidden, batch_first=True, bidirectional=True)
         self.fc = nn.Linear(hidden * 2, n_classes)
         self.use_adv = use_adv
         # patient head: predicts record id from rhythm features through a

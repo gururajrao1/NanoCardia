@@ -280,7 +280,8 @@ def make_windows(X, y, p, rr, radius=4):
     t = 2 * radius + 1
     Xw, yw, Rw, pw = [], [], [], []
     order = np.argsort(p, kind='stable')
-    Xo, yo, po, ro = X[order], y[order], p[order], rr[order]
+    Xo, yo, po = X[order], y[order], p[order]
+    ro = rr[order] if rr is not None else None
     start = 0
     for i in range(1, len(po) + 1):
         if i == len(po) or po[i] != po[start]:
@@ -289,11 +290,13 @@ def make_windows(X, y, p, rr, radius=4):
                 idx = run[j - radius:j + radius + 1]
                 Xw.append(Xo[idx])
                 yw.append(yo[run[j]])
-                Rw.append(ro[idx])
+                if ro is not None:
+                    Rw.append(ro[idx])
                 pw.append(po[run[j]])
             start = i
     return (np.stack(Xw).astype(np.float32), np.array(yw, dtype=np.int64),
-            np.stack(Rw).astype(np.float32), np.array(pw, dtype=np.int64))
+            np.stack(Rw).astype(np.float32) if Rw else None,
+            np.array(pw, dtype=np.int64))
 
 
 def repeat_minority_windows(Xw, yw, Rw, pw, target_classes=(1, 3), seed=0):
