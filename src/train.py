@@ -7,6 +7,19 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import recall_score, accuracy_score
 from sklearn.model_selection import train_test_split
 
+
+def set_seed(seed):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def save_ckpt(path, state, meta):
+    torch.save({'state_dict': {k: v.cpu() for k, v in state.items()},
+                'meta': meta}, path)
+    print(f"saved checkpoint -> {path}", flush=True)
+
 from src.data import synthetic_beats, extract_beats_wfdb, smote_train_only, fusion_mixup_train_only, random_oversample_train_only, within_class_mixup_train_only, make_windows, repeat_minority_windows, CLASS_NAMES, DE_CHAZAL_DS1, DE_CHAZAL_DS2
 from src.model import EfficientECG, VanillaCNN, SeqECG, count_params
 
@@ -82,7 +95,7 @@ class FocalLoss(nn.Module):
 
 def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
              lr=3e-3, bs=256, aug=True, loss='ce', smote=False, fmix=False,
-             fmix_ratio=1.0, ros=False, wcmix=False, ganf=None):
+             fmix_ratio=1.0, ros=False, wcmix=False, ganf=None, save=None):
     if ganf is not None:
         # offline GAN F beats (train only): hard F labels, test untouched
         z = np.load(ganf)
@@ -155,6 +168,8 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
         if r > best:
             best, best_state = r, {k: v.cpu().clone() for k, v in model.state_dict().items()}
     model.load_state_dict(best_state)
+    if save is not None:
+        save_ckpt(save, best_state, {'arch': 'cnn'})
     model.eval()
     t0 = time.perf_counter()
     with torch.no_grad():
@@ -170,7 +185,7 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
 
 def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
               lr=3e-3, bs=128, loss='ce', ros_w=False, curriculum=0.0,
-              adv=False, adv_lamb=0.1, radius=4):
+              adv=False, adv_lamb=0.1, radius=4, save=None):
     """Windowed rhythm-context training (train windows only, test untouched).
 
     Curriculum: first `curriculum` fraction of epochs sees minority-center
@@ -236,6 +251,9 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
         if r > best:
             best, best_state = r, {k: v.cpu().clone() for k, v in model.state_dict().items()}
     model.load_state_dict(best_state)
+    if save is not None:
+        save_ckpt(save, best_state,
+                  {'arch': 'seq', 'use_adv': adv, 'n_patients': len(recs)})
     model.eval()
     t0 = time.perf_counter()
     with torch.no_grad():
@@ -284,7 +302,12 @@ def main():
                     help='domain-adversarial record-id head (gradient reversal)')
     ap.add_argument('--adv-lamb', type=float, default=0.1,
                     help='gradient reversal strength')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='random seed for numpy/torch (report mean±std over seeds)')
+    ap.add_argument('--save', default=None,
+                    help='save best checkpoint (weighted phase) to this path')
     a = ap.parse_args()
+    set_seed(a.seed)
     mode = 'real' if a.real else 'synthetic'
     (Xtr, ytr, rrtr, ptr), (Xte, yte, rrte, pte) = get_data(mode, a.patient_split)
     if a.seq:
@@ -303,7 +326,7 @@ def main():
         wt = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                      use_weights=not a.no_class_weights, epochs=a.epochs,
                      loss=a.loss, ros_w=a.ros, curriculum=a.curriculum,
-                     adv=a.adv, adv_lamb=a.adv_lamb)
+                     adv=a.adv, adv_lamb=a.adv_lamb, save=a.save)
         for tag, r in [('no-weights', base), ('weighted', wt)]:
             pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
             print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "
@@ -326,7 +349,7 @@ def main():
     wt = run_once(Xtr, ytr, Xte, yte, use_weights=not a.no_class_weights, epochs=a.epochs,
                   rrtr=rrtr, rrte=rrte, loss=a.loss, smote=a.smote,
                   fmix=a.fmix, fmix_ratio=a.fmix_ratio, ros=a.ros, wcmix=a.wcmix,
-                  ganf=a.ganf)
+                  ganf=a.ganf, save=a.save)
     for tag, r in [('no-weights', base), ('weighted', wt)]:
         pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
         print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "

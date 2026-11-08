@@ -58,6 +58,16 @@ uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros
 # macro 0.514 -> 0.686 (N 0.77, S 0.81, V 0.94, F 0.23) at 17,529 params.
 # Best macro to date; S record (0.81); F still below the no-synth best (0.39).
 
+# sequence models (real DS1->DS2, 9-beat windows, focal + window-ros):
+# SeqECG: macro 0.596 (F 0.37); +curriculum 0.3: 0.529 (negative, weighting hurt);
+# +adversarial record head: 0.680 (F 0.88 new record, S 0.18 collapses).
+# SeqECG alone does not beat the single-beat recipe; ensemble is the next test.
+
+# CNN + SeqECG ensemble (train each with --save/--seed, then combine logits):
+uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros --wcmix --ganf gan_f_beats.npz --save cnn.pt --seed 0
+uv run python -m src.train --real --epochs 10 --patient-split --seq --loss focal --ros --adv --save seq.pt --seed 0
+uv run python -m src.ensemble --cnn cnn.pt --seq seq.pt --real --patient-split --w-cnn 0.5 --w-seq 0.5
+
 # maintained checks (no extra framework):
 uv run python -m tests.test_upgrades
 ```

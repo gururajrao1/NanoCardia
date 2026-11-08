@@ -175,6 +175,31 @@ def test_repeat_minority_windows():
     assert n.tolist() == [16, 8, 8, 8] and len(d) == len(b)
 
 
+def test_checkpoint_roundtrip_and_ensemble():
+    import tempfile, os
+    from src.model import EfficientECG, SeqECG
+    from src.train import save_ckpt
+    from src.ensemble import load_model
+    d = tempfile.mkdtemp()
+    m = EfficientECG().eval()
+    save_ckpt(os.path.join(d, 'cnn.pt'), m.state_dict(), {'arch': 'cnn'})
+    m2 = load_model(os.path.join(d, 'cnn.pt'))
+    x = torch.randn(2, 1, 188)
+    assert torch.allclose(m(x), m2(x))
+    s = SeqECG(use_adv=True, n_patients=3).eval()
+    save_ckpt(os.path.join(d, 'seq.pt'), s.state_dict(),
+              {'arch': 'seq', 'use_adv': True, 'n_patients': 3})
+    s2 = load_model(os.path.join(d, 'seq.pt'))
+    xw = torch.randn(2, 9, 188)
+    rw = torch.rand(2, 9, 4)
+    assert torch.allclose(s(xw, rw)[0], s2(xw, rw)[0])
+    # ensemble math: weights select the stronger member
+    z1 = torch.tensor([[2.0, 0.0, 0.0, 0.0]])
+    z2 = torch.tensor([[0.0, 0.0, 0.0, 2.0]])
+    assert (0.9 * z1 + 0.1 * z2).argmax(1).item() == 0
+    assert (0.1 * z1 + 0.9 * z2).argmax(1).item() == 3
+
+
 def test_seqecg_forward_and_adv():
     from src.model import SeqECG, GradReverse
     m = SeqECG().eval()
@@ -207,4 +232,5 @@ if __name__ == '__main__':
     test_make_windows_never_crosses_records()
     test_repeat_minority_windows()
     test_seqecg_forward_and_adv()
+    test_checkpoint_roundtrip_and_ensemble()
     print('all upgrade checks passed')
