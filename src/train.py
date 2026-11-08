@@ -95,7 +95,26 @@ class FocalLoss(nn.Module):
 
 def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
              lr=3e-3, bs=256, aug=True, loss='ce', smote=False, fmix=False,
-             fmix_ratio=1.0, ros=False, wcmix=False, ganf=None, save=None):
+             fmix_ratio=1.0, ros=False, wcmix=False, ganf=None, save=None,
+             minibatch=False, sched='cosine', swa=False, val=False, ptr=None):
+    from src.data import minority_batch_order, record_holdout
+    from torch.utils.data import Subset
+    sel_name, sel_y, Xv, yv, Rvv = 'test', None, None, None, None
+    if val:
+        if ptr is not None:
+            vm = record_holdout(ptr)
+        else:
+            _, v_idx = train_test_split(np.arange(len(ytr)), test_size=0.1,
+                                        random_state=0, stratify=ytr)
+            vm = np.zeros(len(ytr), dtype=bool)
+            vm[v_idx] = True
+        keep = ~vm
+        Xv, yv, Rvv = Xtr[vm], ytr[vm], (rrtr[vm] if rrtr is not None else None)
+        Xtr, ytr = Xtr[keep], ytr[keep]
+        rrtr = rrtr[keep] if rrtr is not None else None
+        ptr = ptr[keep] if ptr is not None else None
+        print(f"val split: fit {len(ytr)}, val {len(yv)} (selection on val)",
+              flush=True)
     if ganf is not None:
         # offline GAN F beats (train only): hard F labels, test untouched
         z = np.load(ganf)
@@ -126,14 +145,28 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
         out = fusion_mixup_train_only(Xtr, ytr, rr_tr=rrtr, ratio=fmix_ratio)  # train only
         Xtr, ytr = out[0], out[1]
         rrtr = out[2] if len(out) == 3 else rrtr
+    if val:
+        sel_name, sel_y = 'val', yv
+    else:
+        sel_name, sel_y = 'test', yte
     Xt = torch.from_numpy(Xtr).unsqueeze(1); yt = torch.from_numpy(ytr)
     Xe = torch.from_numpy(Xte).unsqueeze(1); ye = torch.from_numpy(yte)
     Rt = torch.from_numpy(rrtr) if rrtr is not None else None
     Re = torch.from_numpy(rrte) if rrte is not None else None
-    tl = DataLoader(TensorDataset(Xt, Rt, yt) if Rt is not None else TensorDataset(Xt, yt),
-                    batch_size=bs, shuffle=True)
+    fit_ds = TensorDataset(Xt, Rt, yt) if Rt is not None else TensorDataset(Xt, yt)
+    if minibatch:
+        order = minority_batch_order(ytr, bs=bs, seed=0)
+        tl = DataLoader(Subset(fit_ds, order.tolist()), batch_size=bs, shuffle=False)
+    else:
+        tl = DataLoader(fit_ds, batch_size=bs, shuffle=True)
     el = DataLoader(TensorDataset(Xe, Re, ye) if Re is not None else TensorDataset(Xe, ye),
                     batch_size=1024)
+    sl = None
+    if val:
+        Xsv = torch.from_numpy(Xv).unsqueeze(1); ysv = torch.from_numpy(yv)
+        Rsv = torch.from_numpy(Rvv) if Rvv is not None else None
+        sl = DataLoader(TensorDataset(Xsv, Rsv, ysv) if Rsv is not None else
+                        TensorDataset(Xsv, ysv), batch_size=1024)
     model = EfficientECG()
     w = None
     if use_weights:
@@ -146,8 +179,13 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
     else:
         crit = nn.CrossEntropyLoss()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
+    if sched == 'plateau':
+        sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, factor=0.5, patience=max(2, epochs // 5))
+    else:
+        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
     best, best_state = -1, None
+    swa_states = []
     has_rr = Rt is not None
     def fwd(b):
         if has_rr:
@@ -159,15 +197,34 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
         for b in tl:
             out, yb = fwd(b)
             opt.zero_grad(); crit(out, yb).backward(); opt.step()
-        sch.step()
+        if sched == 'plateau':
+            model.eval()
+            with torch.no_grad():
+                pv = torch.cat([fwd(b)[0].argmax(1) for b in (sl or el)]).numpy()
+            sch.step(recall_score(sel_y, pv, average='macro', zero_division=0))
+            model.train()
+        else:
+            sch.step()
+        if swa and ep >= max(0, epochs - 5):
+            swa_states.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
         model.eval()
         with torch.no_grad():
-            pred = torch.cat([fwd(b)[0].argmax(1) for b in el]).numpy()
-        r = recall_score(yte, pred, average='macro', zero_division=0)
-        print(f"  epoch {ep+1}/{epochs} macro-recall={r:.3f}", flush=True)
+            pred = torch.cat([fwd(b)[0].argmax(1) for b in (sl or el)]).numpy()
+        r = recall_score(sel_y, pred, average='macro', zero_division=0)
+        print(f"  epoch {ep+1}/{epochs} {sel_name}-macro-recall={r:.3f}", flush=True)
         if r > best:
             best, best_state = r, {k: v.cpu().clone() for k, v in model.state_dict().items()}
-    model.load_state_dict(best_state)
+    if swa and swa_states:
+        avg = {k: (torch.stack([s[k] for s in swa_states]).mean(0)
+                   if swa_states[0][k].is_floating_point()
+                   else swa_states[-1][k])
+               for k in swa_states[0]}
+        model.load_state_dict(avg)
+        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        print("swa: averaged last-%d epoch weights for final eval" % len(swa_states),
+              flush=True)
+    else:
+        model.load_state_dict(best_state)
     if save is not None:
         save_ckpt(save, best_state, {'arch': 'cnn'})
     model.eval()
@@ -185,13 +242,26 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
 
 def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
               lr=3e-3, bs=128, loss='ce', ros_w=False, curriculum=0.0,
-              adv=False, adv_lamb=0.1, radius=4, save=None):
+              adv=False, adv_lamb=0.1, radius=4, save=None,
+              minibatch=False, sched='cosine', swa=False, val=False):
     """Windowed rhythm-context training (train windows only, test untouched).
 
     Curriculum: first `curriculum` fraction of epochs sees minority-center
     windows only (WavKAN-CL discovery phase), then full data. Adversarial:
     record-id head through gradient reversal forces patient independence.
+    val=True holds out every 7th train record for checkpoint selection.
     """
+    from src.data import minority_batch_order, record_holdout
+    from torch.utils.data import Subset
+    sel_name, sel_yw = 'test', ywte
+    if val:
+        vm = record_holdout(pwtr)
+        Xwv, ywv, Rwv, pwv = Xwtr[vm], ywtr[vm], Rwtr[vm], pwtr[vm]
+        keep = ~vm
+        Xwtr, ywtr, Rwtr, pwtr = Xwtr[keep], ywtr[keep], Rwtr[keep], pwtr[keep]
+        sel_name, sel_yw = 'val', ywv
+        print(f"val split: fit {len(ywtr)}, val {len(ywv)} (selection on val)",
+              flush=True)
     if ros_w:
         Xwtr, ywtr, Rwtr, pwtr = repeat_minority_windows(Xwtr, ywtr, Rwtr, pwtr)
     recs = np.unique(pwtr)
@@ -201,14 +271,26 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
     Rt = torch.from_numpy(Rwtr)
     Re = torch.from_numpy(Rwte)
     pt = torch.tensor([pmap[r] for r in pwtr], dtype=torch.long)
-    tl_full = DataLoader(TensorDataset(zt, Rt, torch.from_numpy(ywtr), pt),
-                         batch_size=bs, shuffle=True)
+    fit_ds = TensorDataset(zt, Rt, torch.from_numpy(ywtr), pt)
+    if minibatch:
+        order = minority_batch_order(ywtr, bs=bs, seed=0)
+        tl_full = DataLoader(Subset(fit_ds, order.tolist()), batch_size=bs,
+                             shuffle=False)
+    else:
+        tl_full = DataLoader(fit_ds, batch_size=bs, shuffle=True)
     el = DataLoader(TensorDataset(ze, Re, torch.from_numpy(ywte)), batch_size=256)
+    sl = None
+    if val:
+        sl = DataLoader(TensorDataset(torch.from_numpy(Xwv), torch.from_numpy(Rwv),
+                                       torch.from_numpy(ywv)), batch_size=256)
     min_mask = np.isin(ywtr, [1, 2, 3])
-    tl_min = DataLoader(TensorDataset(zt[min_mask], Rt[min_mask],
-                                       torch.from_numpy(ywtr[min_mask]),
-                                       pt[min_mask]),
-                        batch_size=bs, shuffle=True) if min_mask.any() else tl_full
+    if minibatch:
+        tl_min = tl_full  # minority batches already guarantee S/F presence
+    else:
+        tl_min = DataLoader(TensorDataset(zt[min_mask], Rt[min_mask],
+                                           torch.from_numpy(ywtr[min_mask]),
+                                           pt[min_mask]),
+                            batch_size=bs, shuffle=True) if min_mask.any() else tl_full
     model = SeqECG(use_adv=adv, n_patients=len(recs))
     def make_crit(ys):
         w = None
@@ -223,9 +305,14 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
     c_full, c_min = make_crit(ywtr), make_crit(ywtr[min_mask])
     pat_crit = nn.CrossEntropyLoss()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
+    if sched == 'plateau':
+        sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, factor=0.5, patience=max(2, epochs // 5))
+    else:
+        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
     n_min_epochs = int(epochs * curriculum)
     best, best_state = -1, None
+    swa_states = []
     for ep in range(epochs):
         model.train()
         tl = tl_min if ep < n_min_epochs else tl_full
@@ -238,19 +325,34 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
             else:
                 l = crit(out, b[2])
             opt.zero_grad(); l.backward(); opt.step()
-        sch.step()
         model.eval()
         with torch.no_grad():
-            pred = []
-            for b in el:
+            pv = []
+            for b in (sl or el):
                 o = model(b[0], b[1])
-                pred.append((o[0] if adv else o).argmax(1))
-            pred = torch.cat(pred).numpy()
-        r = recall_score(ywte, pred, average='macro', zero_division=0)
-        print(f"  epoch {ep+1}/{epochs} macro-recall={r:.3f}", flush=True)
+                pv.append((o[0] if adv else o).argmax(1))
+            pv = torch.cat(pv).numpy()
+        if sched == 'plateau':
+            sch.step(recall_score(sel_yw, pv, average='macro', zero_division=0))
+        else:
+            sch.step()
+        if swa and ep >= max(0, epochs - 5):
+            swa_states.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
+        r = recall_score(sel_yw, pv, average='macro', zero_division=0)
+        print(f"  epoch {ep+1}/{epochs} {sel_name}-macro-recall={r:.3f}", flush=True)
         if r > best:
             best, best_state = r, {k: v.cpu().clone() for k, v in model.state_dict().items()}
-    model.load_state_dict(best_state)
+    if swa and swa_states:
+        avg = {k: (torch.stack([s[k] for s in swa_states]).mean(0)
+                   if swa_states[0][k].is_floating_point()
+                   else swa_states[-1][k])
+               for k in swa_states[0]}
+        model.load_state_dict(avg)
+        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        print("swa: averaged last-%d epoch weights for final eval" % len(swa_states),
+              flush=True)
+    else:
+        model.load_state_dict(best_state)
     if save is not None:
         save_ckpt(save, best_state,
                   {'arch': 'seq', 'use_adv': adv, 'n_patients': len(recs)})
@@ -306,6 +408,13 @@ def main():
                     help='random seed for numpy/torch (report mean±std over seeds)')
     ap.add_argument('--save', default=None,
                     help='save best checkpoint (weighted phase) to this path')
+    ap.add_argument('--minibatch', action='store_true',
+                    help='every batch guaranteed S+F (no dataset-level repetition)')
+    ap.add_argument('--sched', choices=['cosine', 'plateau'], default='cosine')
+    ap.add_argument('--swa', action='store_true',
+                    help='average last-5-epoch weights for final eval')
+    ap.add_argument('--val', action='store_true',
+                    help='hold out every 7th train record for checkpoint selection')
     a = ap.parse_args()
     set_seed(a.seed)
     mode = 'real' if a.real else 'synthetic'
@@ -321,12 +430,14 @@ def main():
               f"test_dist {np.bincount(ywte, minlength=4).tolist()}")
         print("== no-weights ==", flush=True)
         base = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
-                       use_weights=False, epochs=a.epochs)
+                       use_weights=False, epochs=a.epochs,
+                       minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val)
         print(f"== weighted ({a.loss}) ==", flush=True)
         wt = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                      use_weights=not a.no_class_weights, epochs=a.epochs,
                      loss=a.loss, ros_w=a.ros, curriculum=a.curriculum,
-                     adv=a.adv, adv_lamb=a.adv_lamb, save=a.save)
+                     adv=a.adv, adv_lamb=a.adv_lamb, save=a.save,
+                     minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val)
         for tag, r in [('no-weights', base), ('weighted', wt)]:
             pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
             print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "
@@ -344,12 +455,14 @@ def main():
           f"test_dist {np.bincount(yte, minlength=4).tolist()}")
     print("== no-weights ==", flush=True)
     base = run_once(Xtr, ytr, Xte, yte, use_weights=False, epochs=a.epochs,
-                    rrtr=rrtr, rrte=rrte)
+                    rrtr=rrtr, rrte=rrte, minibatch=a.minibatch, sched=a.sched,
+                    swa=a.swa, val=a.val, ptr=ptr)
     print(f"== weighted ({a.loss}) ==", flush=True)
     wt = run_once(Xtr, ytr, Xte, yte, use_weights=not a.no_class_weights, epochs=a.epochs,
                   rrtr=rrtr, rrte=rrte, loss=a.loss, smote=a.smote,
                   fmix=a.fmix, fmix_ratio=a.fmix_ratio, ros=a.ros, wcmix=a.wcmix,
-                  ganf=a.ganf, save=a.save)
+                  ganf=a.ganf, save=a.save, minibatch=a.minibatch, sched=a.sched,
+                  swa=a.swa, val=a.val, ptr=ptr)
     for tag, r in [('no-weights', base), ('weighted', wt)]:
         pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
         print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "

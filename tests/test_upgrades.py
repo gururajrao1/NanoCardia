@@ -200,6 +200,22 @@ def test_checkpoint_roundtrip_and_ensemble():
     assert (0.1 * z1 + 0.9 * z2).argmax(1).item() == 3
 
 
+def test_minority_batches_and_holdout():
+    from src.data import minority_batch_order, record_holdout
+    y = np.array([0] * 100 + [1] * 6 + [2] * 20 + [3] * 4)
+    order = minority_batch_order(y, bs=26, k=4, seed=0)
+    assert len(order) % 26 == 0 and len(order) >= len(y)
+    assert set(range(100)) <= set(order.tolist())  # every majority beat seen
+    # every batch has >=4 minority (S/F) beats
+    for b in range(len(order) // 26):
+        chunk = y[order[b * 26:(b + 1) * 26]]
+        assert np.isin(chunk, [1, 3]).sum() >= 4
+    p = np.array([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112])
+    vm = record_holdout(p)
+    assert vm.sum() >= 1 and vm.sum() < len(p)  # non-trivial patient split
+    assert len(np.unique(p[vm])) + len(np.unique(p[~vm])) == len(np.unique(p))
+
+
 def test_seqecg_forward_and_adv():
     from src.model import SeqECG, GradReverse
     m = SeqECG().eval()
@@ -233,4 +249,5 @@ if __name__ == '__main__':
     test_repeat_minority_windows()
     test_seqecg_forward_and_adv()
     test_checkpoint_roundtrip_and_ensemble()
+    test_minority_batches_and_holdout()
     print('all upgrade checks passed')

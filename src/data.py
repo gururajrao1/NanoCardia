@@ -169,6 +169,48 @@ def fusion_mixup_train_only(Xtr, ytr, seed=0, rr_tr=None, ratio=1.0):
     return out_x, out_y
 
 
+def minority_batch_order(y, bs=256, k=4, seed=0):
+    """Flat index array where every consecutive bs-chunk holds >=k S and >=k F.
+
+    Per-batch minority guarantee (research #3): smoother gradients than
+    dataset-level repetition, no synthetic waveforms. Cycle minority indices.
+    """
+    rng = np.random.default_rng(seed)
+    y = np.asarray(y)
+    mins = np.where(np.isin(y, [1, 3]))[0]
+    majs = np.where(~np.isin(y, [1, 3]))[0]
+    rng.shuffle(mins)
+    rng.shuffle(majs)
+    import math
+    n_batches = max(math.ceil(len(y) / bs),
+                    math.ceil(len(majs) / (bs - k)))
+    need_min = n_batches * k
+    need_maj = n_batches * (bs - k)
+    min_pool = np.tile(mins, max(1, (need_min + len(mins) - 1) // len(mins)))[:need_min]
+    maj_pool = np.tile(majs, max(1, (need_maj + len(majs) - 1) // len(majs)))[:need_maj]
+    rng.shuffle(min_pool)
+    rng.shuffle(maj_pool)
+    out = []
+    for b in range(n_batches):
+        chunk = np.concatenate([min_pool[b * k:(b + 1) * k],
+                                maj_pool[b * (bs - k):(b + 1) * (bs - k)]])
+        rng.shuffle(chunk)
+        out.append(chunk)
+    return np.concatenate(out)
+
+
+def record_holdout(p, every=7):
+    """Deterministic patient-disjoint val mask: every 7th sorted record.
+
+    Checkpoint selection on DS1-val, test touched once — the leakage fix
+    research #0 demands (best-on-test selection is test peeking).
+    """
+    p = np.asarray(p)
+    recs = np.unique(p)
+    val_recs = set(recs[::every].tolist())
+    return np.array([r in val_recs for r in p])
+
+
 def random_oversample_train_only(Xtr, ytr, target_classes=(1, 3), seed=0, rr_tr=None):
     """Repeat real minority beats (train only, no synthetic waveforms).
 
