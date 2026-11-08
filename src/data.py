@@ -227,6 +227,53 @@ def within_class_mixup_train_only(Xtr, ytr, seed=0, rr_tr=None, ratios=None):
     return np.concatenate(out_x), np.concatenate(out_y)
 
 
+def make_windows(X, y, p, rr, radius=4):
+    """Sliding windows of 2*radius+1 consecutive beats; label = center beat.
+
+    Windows never cross records (rhythm context stays within one patient).
+    Beats arrive record-by-record in annotation order, so same-record runs
+    are contiguous; grouping is still done explicitly for safety.
+    Returns (Xw (n,2r+1,win), yw (n,), Rw (n,2r+1,4), pw (n,)).
+    """
+    t = 2 * radius + 1
+    Xw, yw, Rw, pw = [], [], [], []
+    order = np.argsort(p, kind='stable')
+    Xo, yo, po, ro = X[order], y[order], p[order], rr[order]
+    start = 0
+    for i in range(1, len(po) + 1):
+        if i == len(po) or po[i] != po[start]:
+            run = np.arange(start, i)
+            for j in range(radius, len(run) - radius):
+                idx = run[j - radius:j + radius + 1]
+                Xw.append(Xo[idx])
+                yw.append(yo[run[j]])
+                Rw.append(ro[idx])
+                pw.append(po[run[j]])
+            start = i
+    return (np.stack(Xw).astype(np.float32), np.array(yw, dtype=np.int64),
+            np.stack(Rw).astype(np.float32), np.array(pw, dtype=np.int64))
+
+
+def repeat_minority_windows(Xw, yw, Rw, pw, target_classes=(1, 3), seed=0):
+    """Repeat real minority-center windows (train only). Sequence analogue
+    of random oversampling: every training window stays fully real."""
+    rng = np.random.default_rng(seed)
+    ref = int(np.bincount(yw, minlength=4)[2])
+    out = [[Xw], [yw], [Rw], [pw]]
+    for cls in target_classes:
+        m = np.where(yw == cls)[0]
+        need = max(0, ref - len(m))
+        if need == 0:
+            continue
+        picks = m[rng.integers(0, len(m), need)]
+        out[0].append(Xw[picks])
+        out[1].append(yw[picks])
+        out[2].append(Rw[picks])
+        out[3].append(pw[picks])
+    return (np.concatenate(out[0]), np.concatenate(out[1]),
+            np.concatenate(out[2]), np.concatenate(out[3]))
+
+
 def synthetic_beats(n=12000, ratios=(0.90, 0.03, 0.06, 0.01), seed=0, patients=30):
     rng = np.random.default_rng(seed)
     t = np.linspace(0, 1, BEAT_LEN)

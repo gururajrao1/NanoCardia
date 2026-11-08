@@ -78,7 +78,8 @@ class EfficientECG(nn.Module):
         self.fc = nn.Linear(w * 4 + (16 if use_rr else 0) + (16 if use_qrs else 0),
                             n_classes)
 
-    def forward(self, x, rr=None):
+    def features(self, x, rr=None):
+        """160-dim per-beat embedding (GAP morphology + RR MLP + QRS)."""
         q = None
         if self.use_qrs:
             c = x.size(-1) // 2
@@ -93,7 +94,50 @@ class EfficientECG(nn.Module):
             x = torch.cat([x, self.rr_mlp(rr)], dim=1)
         if self.use_qrs:
             x = torch.cat([x, q], dim=1)
-        return self.fc(self.drop(x))
+        return x
+
+    def forward(self, x, rr=None):
+        return self.fc(self.drop(self.features(x, rr)))
+
+
+class GradReverse(torch.autograd.Function):
+    """Gradient reversal for domain-adversarial training (Ganin et al.)."""
+    @staticmethod
+    def forward(ctx, x, lamb):
+        ctx.lamb = lamb
+        return x
+    @staticmethod
+    def backward(ctx, grad_out):
+        return -ctx.lamb * grad_out, None
+
+
+class SeqECG(nn.Module):
+    """Beat-sequence classifier: shared trunk embeds each beat of a window,
+    a tiny BiLSTM reads rhythm context, center beat is classified.
+
+    Isolated-beat models cap out on F (morphologically ambiguous alone but
+    usually obvious in rhythm context). Windows never cross patients.
+    """
+    def __init__(self, trunk=None, n_classes=4, hidden=16,
+                 use_adv=False, n_patients=0):
+        super().__init__()
+        self.trunk = trunk or EfficientECG()
+        self.lstm = nn.LSTM(160, hidden, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(hidden * 2, n_classes)
+        self.use_adv = use_adv
+        # patient head: predicts record id from rhythm features through a
+        # gradient-reversal layer, forcing patient-independent representations
+        self.pat = nn.Linear(hidden * 2, n_patients) if use_adv else None
+
+    def forward(self, xw, rw=None, lamb=0.0):
+        b, t, L = xw.shape
+        f = self.trunk.features(xw.reshape(b * t, 1, L),
+                                rw.reshape(b * t, -1) if rw is not None else None)
+        h, _ = self.lstm(f.view(b, t, -1))
+        c = h[:, t // 2]
+        if self.use_adv:
+            return self.fc(c), self.pat(GradReverse.apply(c, lamb))
+        return self.fc(c)
 
 
 class VanillaCNN(nn.Module):

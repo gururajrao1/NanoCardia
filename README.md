@@ -1,4 +1,4 @@
-# Efficient Heartbeat Classifier (MIT-BIH)
+# NanoCardia — Efficient Heartbeat Classifier (MIT-BIH)
 
 Depthwise-separable 1D CNN for N / S / V / F beats. Optimized for efficiency + rare-class recall.
 

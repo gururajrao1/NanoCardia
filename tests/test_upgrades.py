@@ -8,7 +8,8 @@ import torch
 from src.model import EfficientECG, count_params
 from src.train import FocalLoss
 from src.data import (smote_train_only, fusion_mixup_train_only,
-                        random_oversample_train_only, within_class_mixup_train_only)
+                        random_oversample_train_only, within_class_mixup_train_only,
+                        make_windows, repeat_minority_windows)
 
 
 def test_eca_adds_trivial_params():
@@ -150,8 +151,60 @@ if __name__ == '__main__':
     test_multiscale_stem_and_rr_forward()
     test_fusion_mixup_upsamples_f_only()
     test_fusion_mixup_carries_rr()
+def test_make_windows_never_crosses_records():
+    rng = np.random.default_rng(6)
+    X = rng.normal(size=(30, 188)).astype(np.float32)
+    y = np.arange(30) % 4
+    p = np.array([101] * 12 + [106] * 18)
+    rr = rng.uniform(0.3, 1.2, size=(30, 4)).astype(np.float32)
+    Xw, yw, Rw, pw = make_windows(X, y, p, rr, radius=2)
+    # 12-run -> 8 windows, 18-run -> 14 windows; centers labeled correctly
+    assert Xw.shape == (22, 5, 188) and Rw.shape == (22, 5, 4)
+    assert pw[:8].tolist() == [101] * 8 and pw[8:].tolist() == [106] * 14
+    assert yw[0] == y[2] and yw[8] == y[12 + 2]
+
+
+def test_repeat_minority_windows():
+    rng = np.random.default_rng(7)
+    Xw = rng.normal(size=(30, 9, 188)).astype(np.float32)
+    yw = np.array([0] * 16 + [1] * 4 + [2] * 8 + [3] * 2)
+    Rw = rng.uniform(0.3, 1.2, size=(30, 9, 4)).astype(np.float32)
+    pw = np.array([101] * 30)
+    a, b, c, d = repeat_minority_windows(Xw, yw, Rw, pw)
+    n = np.bincount(b, minlength=4)
+    assert n.tolist() == [16, 8, 8, 8] and len(d) == len(b)
+
+
+def test_seqecg_forward_and_adv():
+    from src.model import SeqECG, GradReverse
+    m = SeqECG().eval()
+    xw = torch.randn(2, 9, 188)
+    rw = torch.rand(2, 9, 4)
+    assert m(xw, rw).shape == (2, 4)
+    ma = SeqECG(use_adv=True, n_patients=5).eval()
+    cls, pat = ma(xw, rw, lamb=0.1)
+    assert cls.shape == (2, 4) and pat.shape == (2, 5)
+    # reversal flips the gradient sign on the trunk path
+    z = torch.randn(3, 8, requires_grad=True)
+    GradReverse.apply(z, 1.0).sum().backward()
+    assert torch.allclose(z.grad, -torch.ones_like(z))
+
+
+if __name__ == '__main__':
+    test_eca_adds_trivial_params()
+    test_eca_forward_shape()
+    test_focal_downweights_easy_examples()
+    test_smote_upsamples_minorities_only()
+    test_smote_chunked_no_self_peers()
+    test_smote_carries_rr()
+    test_multiscale_stem_and_rr_forward()
+    test_fusion_mixup_upsamples_f_only()
+    test_fusion_mixup_carries_rr()
     test_random_oversample_repeats_real_beats_only()
     test_within_class_mixup_keeps_n_out()
     test_qrs_branch_forward_and_budget()
     test_gan_shapes_and_gp_finite()
+    test_make_windows_never_crosses_records()
+    test_repeat_minority_windows()
+    test_seqecg_forward_and_adv()
     print('all upgrade checks passed')
