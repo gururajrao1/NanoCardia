@@ -69,6 +69,12 @@ uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros
 # 0.496 / 0.496 / 0.510 -> mean 0.501 +- 0.008, F 0.00 every time.
 # Tight variance, collapsed level. No-RR ablation: 0.485. ODE-gated F: 0.513
 # (F 0.13 -- only nonzero F in the grid). RR worth ~+0.015; ODE beats GAN (0.00).
+# Per-record RR norm (stabilized + col_znorm, seed 0, 100,633 beats): no-weights 0.495
+# (N 0.91/S 0.08/V 0.99/F 0.00) -> weighted 0.506 (N 0.94/S 0.10/V 0.98/F 0.00), 17,529 params.
+# Inside the stabilized band: norm lifts val (0.678) but not test. Val/test disconnect confirmed.
+# Self-ONN Q=3 stem (stabilized + --selfonn, seed 0): no-weights 0.508
+# (N 0.98/S 0.12/V 0.93/F 0.00) -> weighted 0.520 (N 0.97/S 0.15/V 0.97/F 0.00), 18,265 params.
+# Best stabilized test to date (+0.019 over mean) but F still 0.00; Taylor expressivity helps S/V, not F.
 
 # CNN + SeqECG ensemble (train each with --save/--seed, then combine logits):
 uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros --wcmix --ganf gan_f_beats.npz --save cnn.pt --seed 0
