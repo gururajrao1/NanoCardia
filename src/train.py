@@ -100,7 +100,8 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
              lr=3e-3, bs=256, aug=True, loss='ce', smote=False, fmix=False,
              fmix_ratio=1.0, ros=False, wcmix=False, ganf=None, save=None,
              minibatch=False, sched='cosine', swa=False, val=False, ptr=None,
-             use_rr=True, use_selfonn=False, mf_init=False, mf_freeze=0):
+             use_rr=True, use_selfonn=False, mf_init=False, mf_freeze=0,
+             fboost=1.0):
     from src.data import minority_batch_order, record_holdout
     from src.matched import class_templates, init_stem_matched, zero_stem_grads
     from torch.utils.data import Subset
@@ -181,6 +182,10 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
     if use_weights:
         cnt = np.bincount(ytr, minlength=4).astype(float)
         w = (len(ytr) / (4 * np.maximum(cnt, 1)))
+        if fboost != 1.0:
+            w = w.copy()
+            w[3] *= fboost  # extra emphasis on fusion beats (F ~0.8%)
+            print(f"F-loss boost x{fboost} (F weight {w[3]:.1f})", flush=True)
     if loss == 'focal' and use_weights:
         crit = FocalLoss(alpha=w, gamma=2.0)
     elif use_weights:
@@ -256,7 +261,7 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
               lr=3e-3, bs=128, loss='ce', ros_w=False, curriculum=0.0,
               adv=False, adv_lamb=0.1, radius=4, save=None,
               minibatch=False, sched='cosine', swa=False, val=False,
-              use_rr=True, use_selfonn=False, use_cfc=False):
+              use_rr=True, use_selfonn=False, use_cfc=False, fboost=1.0):
     """Windowed rhythm-context training (train windows only, test untouched).
 
     Curriculum: first `curriculum` fraction of epochs sees minority-center
@@ -325,6 +330,9 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
         if use_weights:
             cnt = np.bincount(ys, minlength=4).astype(float)
             w = (len(ys) / (4 * np.maximum(cnt, 1)))
+            if fboost != 1.0:
+                w = w.copy()
+                w[3] *= fboost
         if loss == 'focal' and use_weights:
             return FocalLoss(alpha=w, gamma=2.0)
         if use_weights:
@@ -472,6 +480,8 @@ def main():
                     help='freeze stem for first N epochs after matched init')
     ap.add_argument('--cfc', action='store_true',
                     help='CfC liquid rhythm head instead of BiLSTM (RR-paced)')
+    ap.add_argument('--fboost', type=float, default=1.0,
+                    help='extra loss multiplier on F (fusion ~0.8%% of beats)')
     ap.add_argument('--config', default=None,
                     help='TOML file with argument values (CLI overrides file)')
     cfg = apply_config(ap)
@@ -505,7 +515,7 @@ def main():
                        use_weights=False, epochs=a.epochs,
                        minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val,
                        use_rr=not a.no_rr, use_selfonn=a.selfonn,
-                       use_cfc=a.cfc)
+                       use_cfc=a.cfc, fboost=a.fboost)
         print(f"== weighted ({a.loss}) ==", flush=True)
         wt = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                      use_weights=not a.no_class_weights, epochs=a.epochs,
@@ -513,7 +523,7 @@ def main():
                      adv=a.adv, adv_lamb=a.adv_lamb, save=a.save,
                      minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val,
                      use_rr=not a.no_rr, use_selfonn=a.selfonn,
-                     use_cfc=a.cfc)
+                     use_cfc=a.cfc, fboost=a.fboost)
         for tag, r in [('no-weights', base), ('weighted', wt)]:
             pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
             print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "
