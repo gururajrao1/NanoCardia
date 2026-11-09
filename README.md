@@ -75,6 +75,11 @@ uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros
 # Self-ONN Q=3 stem (stabilized + --selfonn, seed 0): no-weights 0.508
 # (N 0.98/S 0.12/V 0.93/F 0.00) -> weighted 0.520 (N 0.97/S 0.15/V 0.97/F 0.00), 18,265 params.
 # Best stabilized test to date (+0.019 over mean) but F still 0.00; Taylor expressivity helps S/V, not F.
+# Matched-filter stem init (stabilized + --mf-init freeze 5, seed 0, 100,633 beats):
+# no-weights 0.518 (N 0.96/S 0.13/V 0.96/F 0.02) -> weighted 0.507
+# (N 0.95/S 0.09/V 0.96/F 0.02), 17,529 params. Val peaked 0.711 (highest yet)
+# but test stays in band; F 0.02 nonzero without ODE. Freeze-then-finetune is safe.
+# Loader hardened: socket timeout 300s + 2 retries per record (hangs -> skip).
 
 # CNN + SeqECG ensemble (train each with --save/--seed, then combine logits):
 uv run python -m src.train --real --epochs 10 --patient-split --loss focal --ros --wcmix --ganf gan_f_beats.npz --save cnn.pt --seed 0

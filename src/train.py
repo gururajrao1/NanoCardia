@@ -100,8 +100,9 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
              lr=3e-3, bs=256, aug=True, loss='ce', smote=False, fmix=False,
              fmix_ratio=1.0, ros=False, wcmix=False, ganf=None, save=None,
              minibatch=False, sched='cosine', swa=False, val=False, ptr=None,
-             use_rr=True, use_selfonn=False):
+             use_rr=True, use_selfonn=False, mf_init=False, mf_freeze=0):
     from src.data import minority_batch_order, record_holdout
+    from src.matched import class_templates, init_stem_matched, zero_stem_grads
     from torch.utils.data import Subset
     sel_name, sel_y, Xv, yv, Rvv = 'test', None, None, None, None
     if val:
@@ -172,6 +173,10 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
         sl = DataLoader(TensorDataset(Xsv, Rsv, ysv) if Rsv is not None else
                         TensorDataset(Xsv, ysv), batch_size=1024)
     model = EfficientECG(use_rr=use_rr, use_selfonn=use_selfonn)
+    if mf_init:
+        # matched-filter stem from DS1-fit medians (train side only)
+        init_stem_matched(model, class_templates(Xtr, ytr))
+        print(f"matched-filter stem init (freeze {mf_freeze} epochs)", flush=True)
     w = None
     if use_weights:
         cnt = np.bincount(ytr, minlength=4).astype(float)
@@ -200,7 +205,10 @@ def run_once(Xtr, ytr, Xte, yte, use_weights, epochs, rrtr=None, rrte=None,
         model.train()
         for b in tl:
             out, yb = fwd(b)
-            opt.zero_grad(); crit(out, yb).backward(); opt.step()
+            opt.zero_grad(); crit(out, yb).backward()
+            if mf_init and ep < mf_freeze:
+                zero_stem_grads(model)
+            opt.step()
         if sched == 'plateau':
             model.eval()
             with torch.no_grad():
@@ -451,6 +459,10 @@ def main():
                     help='RR ablation: drop the RR-interval branch entirely')
     ap.add_argument('--selfonn', action='store_true',
                     help='Self-ONN stem (Q=3 generative neurons a la Kiranyaz)')
+    ap.add_argument('--mf-init', action='store_true',
+                    help='matched-filter stem init from DS1 class medians (train only)')
+    ap.add_argument('--mf-freeze', type=int, default=5,
+                    help='freeze stem for first N epochs after matched init')
     ap.add_argument('--config', default=None,
                     help='TOML file with argument values (CLI overrides file)')
     cfg = apply_config(ap)
@@ -512,13 +524,15 @@ def main():
         print("ablation: RR branch off (morphology + QRS only)", flush=True)
     base = run_once(Xtr, ytr, Xte, yte, use_weights=False, epochs=a.epochs,
                     rrtr=rrtr, rrte=rrte, minibatch=a.minibatch, sched=a.sched,
-                    swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr, use_selfonn=a.selfonn)
+                    swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr, use_selfonn=a.selfonn,
+                    mf_init=a.mf_init, mf_freeze=a.mf_freeze)
     print(f"== weighted ({a.loss}) ==", flush=True)
     wt = run_once(Xtr, ytr, Xte, yte, use_weights=not a.no_class_weights, epochs=a.epochs,
                   rrtr=rrtr, rrte=rrte, loss=a.loss, smote=a.smote,
                   fmix=a.fmix, fmix_ratio=a.fmix_ratio, ros=a.ros, wcmix=a.wcmix,
                   ganf=a.ganf, save=a.save, minibatch=a.minibatch, sched=a.sched,
-                  swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr, use_selfonn=a.selfonn)
+                  swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr, use_selfonn=a.selfonn,
+                  mf_init=a.mf_init, mf_freeze=a.mf_freeze)
     for tag, r in [('no-weights', base), ('weighted', wt)]:
         pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
         print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "

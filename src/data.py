@@ -33,6 +33,23 @@ def col_znorm(a):
             (a.std(0, keepdims=True) + 1e-8)).astype(np.float32)
 
 
+def _fetch_with_retry(fetch_fn, rid, retries=2):
+    """Call fetch_fn(rid) up to retries+1 times; raise the last error.
+
+    wfdb opens requests connections with no timeout, so one stalled
+    PhysioNet fetch hangs a whole run. The socket default timeout below
+    turns stalls into errors; this wrapper retries them before the
+    caller skips the record.
+    """
+    last = None
+    for _ in range(retries + 1):
+        try:
+            return fetch_fn(rid)
+        except Exception as e:
+            last = e
+    raise last
+
+
 def extract_beats_wfdb(record_ids=None, win=188):
     """Download+cut MIT-BIH beats.
 
@@ -42,6 +59,7 @@ def extract_beats_wfdb(record_ids=None, win=188):
     rides near-normal rhythm vs premature V, so timing separates what
     morphology cannot. Per-record median fallback at edges.
     """
+    import socket
     import wfdb
     if record_ids is None:
         record_ids = [f"{i:03d}" for i in
@@ -52,48 +70,59 @@ def extract_beats_wfdb(record_ids=None, win=188):
     half = win // 2
     Xs, ys, ps, rs = [], [], [], []
     import sys
-    for i, rid in enumerate(record_ids):
-        print(f"[{i+1}/{len(record_ids)}] loading {rid}...", flush=True)
-        try:
-            sig, meta = wfdb.rdsamp(rid, channels=[0], pn_dir='mitdb')
-            ann = wfdb.rdann(rid, 'atr', pn_dir='mitdb')
-            print(f"  {rid}: {len(ann.sample)} ann, {len(sig)} samples", flush=True)
-        except Exception as e:
-            print(f"skip {rid}: {e}", file=sys.stderr, flush=True)
-            continue
-        fs = float(meta['fs'])
-        s = sig[:, 0].astype(np.float64)
-        # wfdb 360Hz -> downsample to ~125Hz by taking every ~2.88 samples
-        # cheap: resample via linear interp to fixed factor
-        factor = fs / FS_TARGET
-        n_target = int(len(s) / factor)
-        xp = np.linspace(0, len(s) - 1, n_target)
-        s125 = np.interp(xp, np.arange(len(s)), s)
-        samp = np.asarray(ann.sample)
-        syms = list(ann.symbol)
-        diffs = np.diff(samp) / fs
-        med = float(np.median(diffs)) if len(diffs) else 0.8
-        rs_rec = []
-        for j in range(len(samp)):
-            sym = syms[j]
-            if sym not in AAMI_MAP:
+
+    def _fetch(rid):
+        sig, meta = wfdb.rdsamp(rid, channels=[0], pn_dir='mitdb')
+        ann = wfdb.rdann(rid, 'atr', pn_dir='mitdb')
+        return sig, meta, ann
+
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(300)  # stalled fetch -> error, not forever
+    try:
+        for i, rid in enumerate(record_ids):
+            print(f"[{i+1}/{len(record_ids)}] loading {rid}...", flush=True)
+            try:
+                sig, meta, ann = _fetch_with_retry(_fetch, rid)
+                print(f"  {rid}: {len(ann.sample)} ann, {len(sig)} samples",
+                      flush=True)
+            except Exception as e:
+                print(f"skip {rid}: {e}", file=sys.stderr, flush=True)
                 continue
-            c = int(samp[j] / factor)
-            if c - half < 0 or c + half >= len(s125):
-                continue
-            pre = float(diffs[j - 1]) if j > 0 else med
-            post = float(diffs[j]) if j < len(diffs) else med
-            lo, hi = max(0, j - 5), min(len(diffs), j + 5)
-            local = float(np.mean(diffs[lo:hi])) if hi > lo else med
-            local = max(local, 0.2)
-            beat = s125[c - half:c + half]
-            Xs.append(z_norm(beat))
-            ys.append(AAMI_MAP[sym])
-            ps.append(int(rid))
-            rs_rec.append((pre, post, local, pre / local))
-        if rs_rec:
-            # per-record timing norm: same record => same patient, no leakage
-            rs.extend(col_znorm(np.array(rs_rec, dtype=np.float32)).tolist())
+            fs = float(meta['fs'])
+            s = sig[:, 0].astype(np.float64)
+            # wfdb 360Hz -> downsample to ~125Hz by taking every ~2.88 samples
+            # cheap: resample via linear interp to fixed factor
+            factor = fs / FS_TARGET
+            n_target = int(len(s) / factor)
+            xp = np.linspace(0, len(s) - 1, n_target)
+            s125 = np.interp(xp, np.arange(len(s)), s)
+            samp = np.asarray(ann.sample)
+            syms = list(ann.symbol)
+            diffs = np.diff(samp) / fs
+            med = float(np.median(diffs)) if len(diffs) else 0.8
+            rs_rec = []
+            for j in range(len(samp)):
+                sym = syms[j]
+                if sym not in AAMI_MAP:
+                    continue
+                c = int(samp[j] / factor)
+                if c - half < 0 or c + half >= len(s125):
+                    continue
+                pre = float(diffs[j - 1]) if j > 0 else med
+                post = float(diffs[j]) if j < len(diffs) else med
+                lo, hi = max(0, j - 5), min(len(diffs), j + 5)
+                local = float(np.mean(diffs[lo:hi])) if hi > lo else med
+                local = max(local, 0.2)
+                beat = s125[c - half:c + half]
+                Xs.append(z_norm(beat))
+                ys.append(AAMI_MAP[sym])
+                ps.append(int(rid))
+                rs_rec.append((pre, post, local, pre / local))
+            if rs_rec:
+                # per-record timing norm: same record => same patient, no leakage
+                rs.extend(col_znorm(np.array(rs_rec, dtype=np.float32)).tolist())
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
     X = np.stack(Xs).astype(np.float32) if Xs else np.zeros((0, win), np.float32)
     rr = np.array(rs, dtype=np.float32) if rs else np.zeros((0, 4), np.float32)
     return X, np.array(ys, dtype=np.int64), np.array(ps, dtype=np.int64), rr

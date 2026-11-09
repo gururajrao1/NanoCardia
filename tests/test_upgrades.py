@@ -339,6 +339,62 @@ def test_seqecg_forward_and_adv():
     assert torch.allclose(z.grad, -torch.ones_like(z))
 
 
+def test_matched_init_templates_and_fill():
+    from src.matched import (class_templates, init_stem_matched,
+                             stem_conv_params, zero_stem_grads)
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(40, 188)).astype(np.float32)
+    y = np.array([0] * 20 + [1] * 8 + [2] * 8 + [3] * 4)
+    temps = class_templates(X, y)
+    assert len(temps) == 4 and all(t.shape == (188,) for t in temps)
+    assert np.allclose(temps[3], 0.5 * np.median(X[y == 3], axis=0) +
+                       0.5 * np.median(X[y == 2], axis=0))  # F shrunk toward V
+    for use_sn in (False, True):
+        m = EfficientECG(use_selfonn=use_sn)
+        before = [p.detach().clone() for p in m.stem.b7[0].parameters()]
+        init_stem_matched(m, temps)
+        after = [p.detach().clone() for p in m.stem.b7[0].parameters()]
+        assert any(not torch.equal(a, b) for a, b in zip(before, after))
+        # each branch holds 4 copies of each class kernel
+        w = m.stem.b7[0].convs[0].weight if use_sn else m.stem.b7[0].weight
+        assert w.shape[0] == 16 and w.shape[2] == 7
+        z = (w[0, 0] - w[4, 0]).abs().max()  # same class, 4 apart
+        assert z.item() == 0.0
+        # frozen grads zero out; params keep flowing after release
+        m.train()
+        m(torch.randn(2, 1, 188)).sum().backward()
+        zero_stem_grads(m)
+        assert all(p.grad is None or (p.grad == 0).all()
+                   for p in stem_conv_params(m))
+
+
+def test_fetch_retry_retries_then_raises():
+    # loader must not hang forever on a stalled PhysioNet fetch:
+    # retry wrapper re-calls, then surfaces the last error to the skip path
+    from src.data import _fetch_with_retry
+    calls = []
+
+    def fail_once(rid):
+        calls.append(rid)
+        if len(calls) < 2:
+            raise ConnectionError('stalled')
+        return ('sig', rid)
+
+    assert _fetch_with_retry(fail_once, '100', retries=2) == ('sig', '100')
+    assert calls == ['100', '100']  # one retry, then success
+
+    def always_fail(rid):
+        calls.append(rid)
+        raise TimeoutError('hung')
+
+    try:
+        _fetch_with_retry(always_fail, '101', retries=2)
+        raise AssertionError('persistent failure accepted')
+    except TimeoutError:
+        pass
+    assert calls[-3:] == ['101', '101', '101']  # initial + 2 retries
+
+
 if __name__ == '__main__':
     test_eca_adds_trivial_params()
     test_eca_forward_shape()
@@ -364,4 +420,6 @@ if __name__ == '__main__':
     test_config_file_overrides_and_rejects()
     test_selfonn_forward_grad_and_budget()
     test_rr_per_patient_normalized()
+    test_matched_init_templates_and_fill()
+    test_fetch_retry_retries_then_raises()
     print('all upgrade checks passed')
