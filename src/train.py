@@ -256,7 +256,7 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
               lr=3e-3, bs=128, loss='ce', ros_w=False, curriculum=0.0,
               adv=False, adv_lamb=0.1, radius=4, save=None,
               minibatch=False, sched='cosine', swa=False, val=False,
-              use_rr=True, use_selfonn=False):
+              use_rr=True, use_selfonn=False, use_cfc=False):
     """Windowed rhythm-context training (train windows only, test untouched).
 
     Curriculum: first `curriculum` fraction of epochs sees minority-center
@@ -311,8 +311,15 @@ def run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte, use_weights, epochs,
                                            pt[min_mask]),
                             batch_size=bs, shuffle=True) if min_mask.any() else tl_full
     feat_dim = 160 if use_rr else 144
-    model = SeqECG(EfficientECG(use_rr=use_rr, use_selfonn=use_selfonn),
-                   use_adv=adv, n_patients=len(recs), feat_dim=feat_dim)
+    trunk = EfficientECG(use_rr=use_rr, use_selfonn=use_selfonn)
+    if use_cfc:
+        from src.cfc import CfCECG
+        model = CfCECG(trunk, use_adv=adv, n_patients=len(recs),
+                       feat_dim=feat_dim)
+        print("CfC liquid rhythm head (closed-form, RR-paced)", flush=True)
+    else:
+        model = SeqECG(trunk, use_adv=adv, n_patients=len(recs),
+                       feat_dim=feat_dim)
     def make_crit(ys):
         w = None
         if use_weights:
@@ -463,6 +470,8 @@ def main():
                     help='matched-filter stem init from DS1 class medians (train only)')
     ap.add_argument('--mf-freeze', type=int, default=5,
                     help='freeze stem for first N epochs after matched init')
+    ap.add_argument('--cfc', action='store_true',
+                    help='CfC liquid rhythm head instead of BiLSTM (RR-paced)')
     ap.add_argument('--config', default=None,
                     help='TOML file with argument values (CLI overrides file)')
     cfg = apply_config(ap)
@@ -495,19 +504,22 @@ def main():
         base = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                        use_weights=False, epochs=a.epochs,
                        minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val,
-                       use_rr=not a.no_rr, use_selfonn=a.selfonn)
+                       use_rr=not a.no_rr, use_selfonn=a.selfonn,
+                       use_cfc=a.cfc)
         print(f"== weighted ({a.loss}) ==", flush=True)
         wt = run_seq(Xwtr, ywtr, Rwtr, pwtr, Xwte, ywte, Rwte,
                      use_weights=not a.no_class_weights, epochs=a.epochs,
                      loss=a.loss, ros_w=a.ros, curriculum=a.curriculum,
                      adv=a.adv, adv_lamb=a.adv_lamb, save=a.save,
                      minibatch=a.minibatch, sched=a.sched, swa=a.swa, val=a.val,
-                     use_rr=not a.no_rr, use_selfonn=a.selfonn)
+                     use_rr=not a.no_rr, use_selfonn=a.selfonn,
+                     use_cfc=a.cfc)
         for tag, r in [('no-weights', base), ('weighted', wt)]:
             pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
             print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "
                   f"params={r['params']} {r['infer_ms']:.3f}ms/beat")
-        print(f"seq params={wt['params']} (trunk+LSTM, window={2*a.radius+1})")
+        print(f"seq params={wt['params']} (trunk+{'CfC' if a.cfc else 'LSTM'}, "
+              f"window={2*a.radius+1})")
         d = wt['macro_recall'] - base['macro_recall']
         print(f"weighted macro-recall delta: {d:+.3f}")
         print(f"RESUME: Trained a beat-sequence 1D CNN on {len(ywtr)+len(ywte)} "

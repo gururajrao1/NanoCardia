@@ -299,6 +299,27 @@ def test_ode_blend_shapes_and_filter():
     assert plausible(Xs[0], np.median(Xn, axis=0), np.median(Xv, axis=0))
 
 
+def test_ecgsyn_fit_and_beats():
+    from src.ode_synth import (fit_gaussians, synthesize_f_ecgsyn,
+                               ECG_ANGLES, znorm)
+    from src.data import synthetic_beats
+    X, y, p, rr = synthetic_beats(n=1200, seed=2)
+    Xf, rrf = X[y == 3], rr[y == 3]
+    med = np.median(Xf, axis=0)
+    a, z0 = fit_gaussians(med)
+    assert a.shape == (5,) and np.isfinite(a).all() and np.isfinite(z0)
+    assert a[2] == a.max()  # R dominates the fit
+    n_med = np.median(X[y == 0][:500], axis=0)
+    v_med = np.median(X[y == 2][:500], axis=0)
+    Xs, rs = synthesize_f_ecgsyn(Xf, rrf, 8, n_med, v_med, seed=0,
+                                 steps_per_cycle=200)
+    assert Xs.shape == (8, 188) and rs.shape == (8, 4)
+    assert np.isfinite(Xs).all()
+    Xs2, _ = synthesize_f_ecgsyn(Xf, rrf, 8, n_med, v_med, seed=0,
+                                 steps_per_cycle=200)
+    assert np.array_equal(Xs, Xs2)  # seeded generation is deterministic
+
+
 def test_make_windows_no_rr():
     rng = np.random.default_rng(9)
     X = rng.normal(size=(24, 188)).astype(np.float32)
@@ -368,6 +389,34 @@ def test_matched_init_templates_and_fill():
                    for p in stem_conv_params(m))
 
 
+def test_cfc_head_forward_grad_and_budget():
+    from src.cfc import CfCLayer, CfCECG
+    from src.model import count_params, SeqECG
+    layer = CfCLayer(160, 16).train()
+    e = torch.randn(2, 9, 160)
+    dt = torch.randn(2, 9)
+    c = layer(e, dt)
+    assert c.shape == (2, 16)
+    c.sum().backward()  # f and h maps both get gradients
+    assert layer.f.weight.grad is not None and layer.h.weight.grad is not None
+    assert torch.isfinite(layer.f.weight.grad).all()
+    m = CfCECG().eval()
+    xw = torch.randn(2, 9, 188)
+    rw = torch.rand(2, 9, 4)
+    assert m(xw, rw).shape == (2, 4)
+    assert m(xw).shape == (2, 4)  # no-RR path works
+    # dt pacing is live: different timing -> different state
+    c1 = layer(e, torch.zeros(2, 9))
+    c2 = layer(e, torch.ones(2, 9))
+    assert not torch.allclose(c1, c2)
+    ma = CfCECG(use_adv=True, n_patients=5).eval()
+    cls, pat = ma(xw, rw, lamb=0.1)
+    assert cls.shape == (2, 4) and pat.shape == (2, 5)
+    # head is much smaller than the BiLSTM tail it replaces
+    assert count_params(m) < count_params(SeqECG())
+    assert count_params(m) < 30000
+
+
 def test_fetch_retry_retries_then_raises():
     # loader must not hang forever on a stalled PhysioNet fetch:
     # retry wrapper re-calls, then surfaces the last error to the skip path
@@ -393,6 +442,26 @@ def test_fetch_retry_retries_then_raises():
     except TimeoutError:
         pass
     assert calls[-3:] == ['101', '101', '101']  # initial + 2 retries
+
+
+def test_fetch_retry_wall_clock_timeout():
+    # a hung fetch (sleep) is abandoned after timeout_s, then retried
+    import time
+    from src.data import _fetch_with_retry
+    calls = []
+
+    def hung(rid):
+        calls.append(rid)
+        time.sleep(30)
+        return 'never'
+
+    t0 = time.time()
+    try:
+        _fetch_with_retry(hung, '119', retries=1, timeout_s=1)
+        raise AssertionError('hung fetch accepted')
+    except TimeoutError:
+        pass
+    assert calls == ['119', '119'] and time.time() - t0 < 10
 
 
 if __name__ == '__main__':
@@ -421,5 +490,8 @@ if __name__ == '__main__':
     test_selfonn_forward_grad_and_budget()
     test_rr_per_patient_normalized()
     test_matched_init_templates_and_fill()
+    test_cfc_head_forward_grad_and_budget()
     test_fetch_retry_retries_then_raises()
+    test_fetch_retry_wall_clock_timeout()
+    test_ecgsyn_fit_and_beats()
     print('all upgrade checks passed')

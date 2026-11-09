@@ -33,18 +33,26 @@ def col_znorm(a):
             (a.std(0, keepdims=True) + 1e-8)).astype(np.float32)
 
 
-def _fetch_with_retry(fetch_fn, rid, retries=2):
+import concurrent.futures as _fut
+
+# 4 workers: an abandoned (timed-out) attempt keeps its worker until the
+# socket timeout reaps it, so a fresh fetch must never queue behind it.
+_fetch_pool = _fut.ThreadPoolExecutor(max_workers=4)
+
+
+def _fetch_with_retry(fetch_fn, rid, retries=2, timeout_s=300):
     """Call fetch_fn(rid) up to retries+1 times; raise the last error.
 
-    wfdb opens requests connections with no timeout, so one stalled
-    PhysioNet fetch hangs a whole run. The socket default timeout below
-    turns stalls into errors; this wrapper retries them before the
-    caller skips the record.
+    wfdb opens requests connections with no timeout, and a dribbling
+    server defeats even the socket default timeout (set below), so each
+    attempt also gets a wall-clock budget: on expiry the attempt is
+    abandoned (its thread is reaped by the socket timeout) and retried.
     """
     last = None
     for _ in range(retries + 1):
+        fut = _fetch_pool.submit(fetch_fn, rid)
         try:
-            return fetch_fn(rid)
+            return fut.result(timeout=timeout_s)
         except Exception as e:
             last = e
     raise last
