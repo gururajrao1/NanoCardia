@@ -464,6 +464,21 @@ def test_fetch_retry_wall_clock_timeout():
     assert calls == ['119', '119'] and time.time() - t0 < 10
 
 
+def test_fboost_reaches_single_beat_training():
+    # --fboost must reach run_once: the weighted single-beat phase prints its F bump
+    import io, sys, contextlib
+    from src.train import main
+    old = sys.argv
+    try:
+        sys.argv = ['prog', '--epochs', '1', '--fboost', '2.0']
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main()
+        assert 'F-loss boost x2.0' in buf.getvalue()
+    finally:
+        sys.argv = old
+
+
 if __name__ == '__main__':
     test_eca_adds_trivial_params()
     test_eca_forward_shape()
@@ -494,4 +509,5 @@ if __name__ == '__main__':
     test_fetch_retry_retries_then_raises()
     test_fetch_retry_wall_clock_timeout()
     test_ecgsyn_fit_and_beats()
+    test_fboost_reaches_single_beat_training()
     print('all upgrade checks passed')

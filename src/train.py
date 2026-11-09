@@ -547,14 +547,14 @@ def main():
     base = run_once(Xtr, ytr, Xte, yte, use_weights=False, epochs=a.epochs,
                     rrtr=rrtr, rrte=rrte, minibatch=a.minibatch, sched=a.sched,
                     swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr, use_selfonn=a.selfonn,
-                    mf_init=a.mf_init, mf_freeze=a.mf_freeze)
+                    mf_init=a.mf_init, mf_freeze=a.mf_freeze, fboost=a.fboost)
     print(f"== weighted ({a.loss}) ==", flush=True)
     wt = run_once(Xtr, ytr, Xte, yte, use_weights=not a.no_class_weights, epochs=a.epochs,
                   rrtr=rrtr, rrte=rrte, loss=a.loss, smote=a.smote,
                   fmix=a.fmix, fmix_ratio=a.fmix_ratio, ros=a.ros, wcmix=a.wcmix,
                   ganf=a.ganf, save=a.save, minibatch=a.minibatch, sched=a.sched,
                   swa=a.swa, val=a.val, ptr=ptr, use_rr=not a.no_rr, use_selfonn=a.selfonn,
-                  mf_init=a.mf_init, mf_freeze=a.mf_freeze)
+                  mf_init=a.mf_init, mf_freeze=a.mf_freeze, fboost=a.fboost)
     for tag, r in [('no-weights', base), ('weighted', wt)]:
         pc = ' '.join(f"{c}={v:.2f}" for c, v in zip(CLASS_NAMES, r['per_class']))
         print(f"[{tag}] acc={r['acc']:.3f} macro-recall={r['macro_recall']:.3f} {pc} "

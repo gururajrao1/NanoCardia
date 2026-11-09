@@ -88,6 +88,11 @@ uv run python -m src.ensemble --cnn cnn.pt --seq seq.pt --real --patient-split -
 
 # maintained checks (no extra framework):
 uv run python -m tests.test_upgrades
+
+# --fboost (extra F loss multiplier, now wired to single-beat + seq):
+# synthetic smoke (focal + ros + wcmix + fboost 2.0, 12k beats, 09-11-2026):
+# weighted macro 0.989 (N 0.96/S 1.00/V 1.00/F 1.00), F weight 2.9, 17,529 params.
+# Synthetic F is trivially easy; honest check is the relaunched ECGSYN-F real chain.
 ```
 
 Outputs per-class recall, macro-recall, param count, inference time/beat.
